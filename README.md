@@ -4,48 +4,43 @@ Downloads level data from a Sokkia SDL50 digital level over a USB-serial
 adaptor, reduces it, and produces a level report — in one step, replacing the
 download-then-FileMaker workflow.
 
-Cross-platform (Windows, macOS, Linux). Pure Python plus `pyserial`; the GUI
-is Tkinter, which ships with Python, so there is nothing else to install.
-
-## Status
-
-The reduction logic is a **verified** port of the FileMaker database: given
-the sample job `AZM020420`, this code reproduces the database's exported file
-byte for byte (1677 bytes, `tests/test_reduce.py`). The serial layer is
-exercised over a pseudo-terminal pair in `tests/test_serialio.py`, but has
-**not yet been run against a real SDL50** — see "Before first real use".
-
-## Install
+**Prototype: one script, no install.** `sdl_levels.py` is the whole program.
+Packaging comes later.
 
 ```sh
-pip install -e .          # add [dev] for the tests
+python sdl_levels.py gui                        # download → report
+python sdl_levels.py gui data/AZM020420.csv     # open straight onto a file
+python sdl_levels.py selftest                   # prove the reduction is faithful
 ```
 
-## Use
+Runs on Windows, macOS and Linux. Only the `download` command needs
+`pip install pyserial`; everything else runs on a stock Python 3.9+ (the GUI
+uses Tkinter, which ships with Python).
+
+## Command line
 
 ```sh
-sdlproc gui               # the one-window version: download → report
-```
-
-or from the command line:
-
-```sh
-sdlproc ports                                     # what's plugged in
-sdlproc download --port COM3 -o AZM020420.csv     # capture from the instrument
-sdlproc report AZM020420.csv --start-rl 74.614 \
-        --surveyor "M. Ankor" --csv levels.csv    # reduce and write the report
+python sdl_levels.py ports                              # what's plugged in
+python sdl_levels.py download --port COM3 -o job.csv    # capture
+python sdl_levels.py report job.csv --start-rl 74.614 \
+       --surveyor "M. Ankor" --csv levels.csv           # reduce and report
+python sdl_levels.py fmexport job.csv --initial 74.614  # legacy format
 ```
 
 The report is HTML with print rules: open it and use the browser's
-**Print → Save as PDF**. `--csv` additionally writes a flat spreadsheet of
-reduced levels.
+**Print → Save as PDF**.
 
-To reproduce the old FileMaker export instead (tab-separated, spreadsheet
-formulas rather than numbers, CR line endings):
+## Status
 
-```sh
-sdlproc fmexport AZM020420.csv --initial 74.614
-```
+The reduction logic is a **verified** port of the FileMaker database. Given
+the sample job `AZM020420`, it reproduces the database's exported file byte
+for byte — 1677 bytes. `selftest` checks that, and it is the contract: if the
+output ever moves, the change is wrong.
+
+The serial path has **not yet been run against a real SDL50.** On the first
+real download, keep whatever lands in `raw/` whether or not it parses, and
+send it back if anything looks off — it is enough to diagnose framing or
+flow-control problems offline.
 
 ## Serial settings
 
@@ -53,14 +48,18 @@ Defaults are 9600 8-N-1, no flow control. Override with `--baud`,
 `--bytesize`, `--parity`, `--stopbits`, `--xonxoff`, `--rtscts`.
 
 The SDL50 pushes data when the operator starts the transfer from the
-instrument's menu; the host does not request anything. So the app opens the
+instrument's menu; the host does not request anything. So the script opens the
 port, waits (up to `--start-timeout`, default 3 minutes) for the first byte,
 then reads until the line has been quiet for `--idle-timeout` (default 3 s).
 
 **Every capture writes the raw bytes to `raw/` before anything parses them.**
-If a download ever fails to parse, that file is the evidence and can be
-replayed through the rest of the app offline. It is worth keeping anyway as
-the unmodified record of what the instrument sent.
+That file is the evidence if a download ever fails to parse, and it can be
+replayed through the rest of the script offline. Worth keeping anyway as the
+unmodified record of what the instrument sent.
+
+Open questions only a real download can settle: whether the instrument needs
+DTR asserted or XON/XOFF handshaking, and whether it always sends this CSV
+layout or can send SDR33 depending on a setting.
 
 ## The data
 
@@ -89,11 +88,14 @@ Reduction happens in three stages, mirroring the FileMaker scripts:
    `RL = (RL + backsight at the last setup) − this sight`. Intermediates use
    the instrument height but do not carry it forward.
 
-On top of that the app adds what the spreadsheet step used to: real reduced
+On top of that the script adds what the spreadsheet step used to: real reduced
 levels rather than formulas, per-run sums, the arithmetic check
 (ΣBS − ΣFS against last RL − first RL), route length from the recorded sight
-distances, and misclose against a `12√K` mm allowance (the coefficient is
-`--allowance`).
+distances, and misclose against a `12√K` mm allowance (`--allowance`).
+
+Where no starting level is given, the first run falls back to the instrument's
+own assumed datum of 100.0000, so an un-benchmarked job still reduces to the
+numbers the instrument shows.
 
 ## Two things found in the FileMaker database
 
@@ -101,62 +103,31 @@ distances, and misclose against a `12√K` mm allowance (the coefficient is
 `Last EL = Reduced Level And Last Point ID = Point ID`, but `Last EL` is a
 *global* field while `Last Point ID` beside it is a *per-record* field. After
 the script steps to the next record, that second test reads the new record's
-own empty field, so it can never be true. The exported report proves the merge
-is meant to run on the elevation test alone, and that this is the *right*
-behaviour: in the sample job the operator mis-keyed a point number — a
-foresight to 0019 followed by a backsight labelled 0020 — and the two were
-still correctly merged as one setup. This port uses the elevation test only,
-and keeps the stricter variant behind `build(..., match_point_id=True)` for
-comparison. **Worth checking the database's own field definitions**: if that
-global flag was changed at some point, merging there may now behave
-differently from when the sample report was produced.
+own empty field, so it can never be true.
+
+The exported report proves the elevation test alone is the correct behaviour:
+in the sample job the operator mis-keyed a point number — a foresight to 0019
+followed by a backsight labelled 0020 — and the two were still correctly
+merged as one setup, with 0020 vanishing. This port uses the elevation test
+only, and keeps the stricter variant behind `build(..., match_point_id=True)`.
+**Worth checking the database's field definitions**: if that global flag was
+changed at some point, merging there may now behave differently from when the
+sample report was produced.
 
 **Number formatting is inconsistent, and it is an artefact.** In the exported
 file the backsight column keeps the instrument's original text (`0.2843`,
 `1.7840`) because the import writes it straight into the field, while the
 foresight and intermediate columns are written by `Set Field` and so come back
 out as calculated numbers with leading and trailing zeros stripped (`.9554`,
-`1.515`). `fmexport` reproduces this exactly, for parity. The app's own
+`1.515`). `fmexport` reproduces this exactly, for parity. The script's own
 outputs use a consistent 4 decimal places throughout.
-
-## Before first real use
-
-The serial path has never met the actual instrument. On the first real
-download, please:
-
-1. Run `sdlproc download --port … -o job.csv` and keep whatever lands in
-   `raw/`, whether or not it parses.
-2. Send that raw file back if anything looks wrong — it is enough to diagnose
-   framing, flow control or format problems offline.
-
-Open questions that only a real download can settle: whether the instrument
-needs DTR asserted or XON/XOFF handshaking, and whether the file it sends is
-always this CSV layout or can be SDR33 depending on an instrument setting.
 
 ## Open decisions
 
 - **Misclose is reported, not distributed.** No correction is spread through
   the run, because the FileMaker version did not do so and changing that would
   silently move every level. Say the word and it becomes an option.
-- **Closing levels are assumed.** Each run is assumed to close back on its
-  own starting level, which is what the sample job does (both runs close to
-  +1.7 mm and +0.1 mm). Runs that close on a *different* known benchmark need
-  that value entering — currently only the starting level is editable per run.
-
-## Packaging
-
-```sh
-pip install pyinstaller
-pyinstaller --onefile --windowed --name SDLProcessor -c sdlproc/gui.py
-```
-
-produces a standalone `.exe` on Windows and a `.app` on macOS from the same
-source. On Windows the adaptor appears as `COM3`; on macOS as
-`/dev/cu.usbserial-*`. FTDI and CP210x adaptors need no driver on either;
-CH340 clones occasionally need a vendor driver on macOS.
-
-## Tests
-
-```sh
-python -m pytest
-```
+- **Closing levels are assumed.** Each run is assumed to close back on its own
+  starting level, which is what the sample job does (+1.7 mm and +0.1 mm).
+  Runs closing on a *different* known benchmark need that value entering;
+  currently only the starting level is editable per run.

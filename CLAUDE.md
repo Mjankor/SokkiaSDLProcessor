@@ -1,33 +1,38 @@
 # SokkiaSDLProcessor — project rules
 
-## The golden test is the contract
+## Prototype shape
 
-`tests/data/AZM020420.csv` is a real SDL50 download and
-`AZM020420-reduced.txt` is what the FileMaker database produced from it.
-`test_matches_filemaker_export_byte_for_byte` must keep passing: it is the
-only proof that the reduction logic is a faithful port. Do not "fix" the
-expected file to make a change pass — if the output moves, the change is
-wrong, or the reason it is right has to be written down.
+One script, `sdl_levels.py`, with no install step and no dependency but
+`pyserial` (and that only for the `download` command). Keep it that way until
+we deliberately decide to package it — no new files, no `pip install -e`.
+
+Section order in the file: parsing → reduction → FileMaker export → report →
+serial → GUI → selftest → CLI. Nothing above the serial section may import
+`pyserial`, and nothing above the GUI section may import `tkinter`; both are
+imported lazily so the whole pipeline stays runnable, and testable, with no
+instrument attached and no display.
+
+## The selftest is the contract
+
+`data/AZM020420.csv` is a real SDL50 download and `AZM020420-reduced.txt` is
+what the FileMaker database produced from it. `python sdl_levels.py selftest`
+must keep passing: the byte-for-byte check is the only proof that the
+reduction is a faithful port. Do not edit the expected file to make a change
+pass — if the output moves, the change is wrong, or the reason it is right has
+to be written down.
 
 Add a new golden pair (raw download + its finished report) whenever a job
 turns up a case the current fixture does not cover.
-
-## Layering
-
-`parser` → `reduce` → (`report` | `fmexport`); `serialio` feeds `parser` and
-depends on nothing else. `cli` and `gui` are thin shells. No reduction logic
-in the UI layer, and nothing below `serialio` may import `pyserial` — the core
-must stay importable and testable without it, which is what lets the whole
-pipeline be developed with no instrument attached.
 
 ## Conventions
 
 - Serial capture always writes the raw bytes to disk *before* parsing them.
   A download that fails to parse must still leave evidence behind.
-- `fmexport` reproduces FileMaker's quirks deliberately (raw backsight text,
-  stripped leading/trailing zeros on calculated fields, CR record separators).
-  Do not "tidy" them — that module's whole job is byte-level parity. New,
-  better-behaved output goes in `report`.
-- Tolerances and allowances are parameters with documented defaults, not
-  literals buried in code (see `Run.allowable_misclose`).
+- The FileMaker export section reproduces FileMaker's quirks deliberately (raw
+  backsight text, stripped zeros on calculated fields, CR record separators).
+  Do not "tidy" them — byte-level parity is that section's whole job. New,
+  better-behaved output goes in the report section.
+- Tolerances, allowances and datums are named constants or parameters with
+  documented defaults, not literals buried in code (see `ASSUMED_DATUM` and
+  `Run.allowable_misclose`).
 - Branch per change, cut from `main`, merged back by PR.
