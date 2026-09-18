@@ -8,14 +8,18 @@ download-then-FileMaker workflow.
 Packaging comes later.
 
 ```sh
-python sdl_levels.py gui                        # download → report
-python sdl_levels.py gui data/AZM020420.csv     # open straight onto a file
+python sdl_levels.py                            # opens the window: download → report
+python sdl_levels.py data/AZM020420.csv         # opens the window onto a file
 python sdl_levels.py selftest                   # prove the reduction is faithful
 ```
 
+Run with no arguments it opens the window, so it works as a double-click or as
+the file association for a download. `gui` does the same thing explicitly.
+
 Runs on Windows, macOS and Linux. Only the `download` command needs
-`pip install pyserial`; everything else runs on a stock Python 3.9+ (the GUI
-uses Tkinter, which ships with Python).
+`pip install pyserial`; everything else runs on a stock Python 3.9+. The GUI
+uses Tkinter, which is bundled with the official Python on Windows and macOS
+(on Linux it is usually a separate package, e.g. `sudo apt install python3-tk`).
 
 ## Command line
 

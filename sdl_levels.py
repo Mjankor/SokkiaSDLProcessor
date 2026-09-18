@@ -709,9 +709,20 @@ def capture(port, baudrate=9600, bytesize=8, parity="N", stopbits=1,
 def run_gui(preload=None) -> int:
     import queue  # noqa: PLC0415
     import threading  # noqa: PLC0415
-    import tkinter as tk  # noqa: PLC0415
     import webbrowser  # noqa: PLC0415
-    from tkinter import filedialog, messagebox, ttk  # noqa: PLC0415
+
+    try:
+        import tkinter as tk  # noqa: PLC0415
+        from tkinter import filedialog, messagebox, ttk  # noqa: PLC0415
+    except ImportError:
+        # Bundled with the official Python on Windows and macOS, but commonly a
+        # separate package on Linux.
+        print("The window needs tkinter, which this Python does not have.\n"
+              "  Debian/Ubuntu:  sudo apt install python3-tk\n"
+              "  Fedora:         sudo dnf install python3-tkinter\n"
+              "Or use the command line instead: sdl_levels.py report <file>",
+              file=sys.stderr)
+        return 2
 
     class App(ttk.Frame):
         def __init__(self, master):
@@ -1158,7 +1169,22 @@ def _starts(values):
     return out
 
 
+COMMANDS = ("gui", "ports", "selftest", "download", "report", "fmexport")
+
+
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    # Running the script with no arguments -- a double-click, or just
+    # `python sdl_levels.py` -- should open the window, not print usage.
+    # A bare filename should open the window onto that file, so the script can
+    # be set as the file association for a download.
+    if not argv:
+        argv = ["gui"]
+    elif (argv[0] not in COMMANDS and not argv[0].startswith("-")
+          and Path(argv[0]).exists()):
+        argv = ["gui", argv[0]]
+
     parser = argparse.ArgumentParser(
         prog="sdl_levels.py", description="Download and reduce Sokkia SDL50 level data.")
     parser.add_argument("--version", action="version", version=VERSION)
