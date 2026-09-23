@@ -65,6 +65,62 @@ Open questions only a real download can settle: whether the instrument needs
 DTR asserted or XON/XOFF handshaking, and whether it always sends this CSV
 layout or can send SDR33 depending on a setting.
 
+## When nothing arrives
+
+Work down this list; each step rules something out.
+
+**1. Does the adaptor appear at all?**
+
+```sh
+ls /dev/cu.*
+python sdl_levels.py ports
+```
+
+If `/dev/cu.usbserial-210` (or similar) is listed, the USB-C adapter, the
+USB-serial converter and its driver are all fine — the problem is downstream,
+in settings or cabling. If nothing appears, it is the converter or its driver,
+and nothing past that point matters yet. `ports` also names the chipset, which
+decides whether macOS needs a driver for it: FTDI and Silicon Labs CP210x work
+with drivers Apple ships, CH340 clones usually need a vendor driver, and
+counterfeit PL2303 chips enumerate but are then refused by Prolific's driver —
+the port appears, but no data ever flows.
+
+**2. Are you on the `cu.*` node, not `tty.*`?**
+
+This is the single most common reason a serial terminal appears dead on a Mac.
+Every adaptor appears twice, as `/dev/tty.usbserial-210` and
+`/dev/cu.usbserial-210`. Opening the **`tty.`** node blocks until the other end
+asserts carrier detect, which a survey instrument never does — so the terminal
+just sits there forever, looking like a broken link. Use `cu.`. This script
+rewrites `tty.` to `cu.` automatically and says so.
+
+**3. Does anything reach the port?**
+
+```sh
+python sdl_levels.py monitor --port /dev/cu.usbserial-210
+```
+
+Then start the transfer on the instrument. This never tries to parse: any byte
+that arrives is shown as hex and text, however mangled, which is what separates
+a dead cable from wrong settings. It also shows the CTS/DSR/CD/RI lines, and
+prints a checklist if nothing comes through.
+
+**4. If bytes arrive but look like noise**, the baud rate or framing is wrong:
+
+```sh
+python sdl_levels.py scan --port /dev/cu.usbserial-210
+```
+
+Start the transfer, then let it cycle through the common settings and score
+each on how much of what arrived looks like text. It has to sample while data
+is flowing, because the instrument sends its data only once.
+
+**5. If nothing arrives at any setting**, it is not a baud problem. Try flow
+control (`--rtscts`, or `--xonxoff`), then forcing the handshake lines
+(`--dtr on`, `--rts on`) in case the instrument waits on one. After that,
+suspect the cable — a straight-through DB9 where a crossover is needed is a
+common trap — or the adaptor itself.
+
 ## The data
 
 The instrument writes one CSV line per observation:
