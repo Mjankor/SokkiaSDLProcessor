@@ -67,7 +67,14 @@ layout or can send SDR33 depending on a setting.
 
 ## When nothing arrives
 
-Work down this list; each step rules something out.
+**In the app: "Connection test…"**, under the port selector. It runs the same
+two tests described below, with their output in a log pane, and a "Copy log"
+button so the result can be pasted into an email. No terminal needed — which
+matters, because the person with the cable in their hand is not always the
+person who is comfortable at a command line.
+
+The command line equivalents are below. Work down the list; each step rules
+something out.
 
 **1. Does the adaptor appear at all?**
 

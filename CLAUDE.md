@@ -24,6 +24,18 @@ to be written down.
 Add a new golden pair (raw download + its finished report) whenever a job
 turns up a case the current fixture does not cover.
 
+## The GUI must not reimplement anything
+
+`monitor` and `scan` take an `emit` callback and a `should_stop` predicate so
+the command line and the window run the *same* routine — the command line
+passes `print`, the window passes a queue feed and a Stop button. Any new
+diagnostic follows that shape rather than growing a second copy inside the GUI.
+
+Tk variables may only be read from the main thread. Anything a worker thread
+needs is snapshotted first — see `_link_kwargs` — because reading
+`self.baud.get()` inside a lambda that runs on the worker raises "main thread
+is not in main loop" only at runtime, and only when a real port is attached.
+
 ## Conventions
 
 - Serial capture always writes the raw bytes to disk *before* parsing them.

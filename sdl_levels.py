@@ -840,19 +840,23 @@ def printable_ratio(data: bytes) -> float:
 
 def monitor(port, baudrate=9600, bytesize=8, parity="N", stopbits=1,
             xonxoff=False, rtscts=False, dtr=None, rts=None,
-            seconds=60.0, show_hex=True) -> int:
-    """Watch a port and print whatever arrives, as hex and text.
+            seconds=60.0, show_hex=True, emit=print, should_stop=None) -> int:
+    """Watch a port and report whatever arrives, as hex and text.
 
     This is the "is anything happening at all" tool.  It never tries to parse:
     if a single byte arrives it is shown, however mangled, which is what
     separates a dead cable from wrong baud settings.
+
+    `emit` receives each line, so the same routine drives the command line
+    (where it prints) and the GUI (where it appends to a log pane).
+    `should_stop` is polled so a Stop button can end it early.
     """
     serial = _require_serial()
     port, warning = normalise_port(port)
     if warning:
-        print(f"note: {warning}")
+        emit(f"note: {warning}")
 
-    print(f"Opening {port} at {baudrate} {bytesize}{parity}{stopbits}, "
+    emit(f"Opening {port} at {baudrate} {bytesize}{parity}{stopbits}, "
           f"flow={'xon/xoff' if xonxoff else 'rts/cts' if rtscts else 'none'}")
     with serial.Serial(port=port, baudrate=baudrate, bytesize=bytesize, parity=parity,
                        stopbits=stopbits, xonxoff=xonxoff, rtscts=rtscts,
@@ -861,9 +865,9 @@ def monitor(port, baudrate=9600, bytesize=8, parity="N", stopbits=1,
             link.dtr = dtr
         if rts is not None:
             link.rts = rts
-        print(f"  DTR={int(bool(link.dtr))} RTS={int(bool(link.rts))}  "
+        emit(f"  DTR={int(bool(link.dtr))} RTS={int(bool(link.rts))}  "
               f"{_control_lines(link)}")
-        print(f"Listening for {seconds:.0f}s. Start the transfer on the "
+        emit(f"Listening for {seconds:.0f}s. Start the transfer on the "
               f"instrument now. Ctrl-C to stop.\n")
         link.reset_input_buffer()
 
@@ -871,59 +875,69 @@ def monitor(port, baudrate=9600, bytesize=8, parity="N", stopbits=1,
         deadline = time.monotonic() + seconds
         try:
             while time.monotonic() < deadline:
+                if should_stop is not None and should_stop():
+                    emit("stopped.")
+                    break
                 data = link.read(link.in_waiting or 1)
                 if data:
                     if show_hex:
-                        print(_hexdump(data, total))
+                        emit(_hexdump(data, total))
                     else:
-                        print(data.decode("ascii", errors="replace"), end="")
+                        emit(data.decode("ascii", errors="replace").rstrip("\n"))
                     total += len(data)
                 now_lines = _control_lines(link)
                 if now_lines != lines_before:
-                    print(f"  [control lines changed: {now_lines}]")
+                    emit(f"  [control lines changed: {now_lines}]")
                     lines_before = now_lines
         except KeyboardInterrupt:
-            print("\nstopped.")
+            emit("stopped.")
 
-    print(f"\n{total} bytes received.")
+    emit(f"{total} bytes received.")
     if total == 0:
-        print("\nNothing arrived at all. In order of likelihood:")
-        print("  1. Wrong port. Run `ports` and check the device name.")
-        print("  2. Transfer not actually started on the instrument.")
-        print("  3. Flow control: try --rtscts, or --dtr on, in case the")
-        print("     instrument waits for a line to be raised.")
-        print("  4. Cable: a straight-through DB9 where a crossover is needed,")
-        print("     or the wrong socket on the instrument.")
-        print("  5. The adaptor itself -- check the chipset line in `ports`.")
-        print("\nIf the control lines above are all 0 and never changed, suspect")
-        print("the cable or the adaptor before anything in software.")
+        emit("Nothing arrived at all. In order of likelihood:")
+        emit("  1. Wrong port. Run `ports` and check the device name.")
+        emit("  2. Transfer not actually started on the instrument.")
+        emit("  3. Flow control: try --rtscts, or --dtr on, in case the")
+        emit("     instrument waits for a line to be raised.")
+        emit("  4. Cable: a straight-through DB9 where a crossover is needed,")
+        emit("     or the wrong socket on the instrument.")
+        emit("  5. The adaptor itself -- check the chipset line in `ports`.")
+        emit("If the control lines above are all 0 and never changed, suspect")
+        emit("the cable or the adaptor before anything in software.")
     else:
-        print("Bytes arrived, so the link is alive. If they look like noise")
-        print("rather than text, the baud rate or framing is wrong -- run `scan`.")
+        emit("Bytes arrived, so the link is alive. If they look like noise")
+        emit("rather than text, the baud rate or framing is wrong -- run `scan`.")
     return 0 if total else 1
 
 
 def scan(port, seconds_each=1.5, rounds=3, xonxoff=False, rtscts=False,
-         dtr=None, rts=None) -> int:
+         dtr=None, rts=None, emit=print, should_stop=None):
     """Cycle through common serial settings and report which yields text.
 
     The instrument sends its data once, so this has to sample while the
     transfer is running: start the download on the instrument, then let this
     cycle.  Each setting gets a short listen and is scored on how much of what
     arrived looks like text.
+
+    Returns the best (baud, bytesize, parity, stopbits) found, or None if
+    nothing arrived at any setting, so a caller can offer to apply it.
     """
     serial = _require_serial()
     port, warning = normalise_port(port)
     if warning:
-        print(f"note: {warning}")
+        emit(f"note: {warning}")
 
-    print(f"Scanning {port}: {len(SCAN_SETTINGS)} settings x {rounds} round(s) "
+    emit(f"Scanning {port}: {len(SCAN_SETTINGS)} settings x {rounds} round(s) "
           f"at {seconds_each:.1f}s each.")
-    print("Start the transfer on the instrument NOW and let it run.\n")
+    emit("Start the transfer on the instrument NOW and let it run.\n")
 
     results = {}
     for round_no in range(rounds):
         for baud, bits, par, stop in SCAN_SETTINGS:
+            if should_stop is not None and should_stop():
+                emit("stopped.")
+                rounds = round_no  # fall through to the summary of what we got
+                break
             key = (baud, bits, par, stop)
             try:
                 with serial.Serial(port=port, baudrate=baud, bytesize=bits, parity=par,
@@ -949,11 +963,13 @@ def scan(port, seconds_each=1.5, rounds=3, xonxoff=False, rtscts=False,
             if payload and not entry["sample"]:
                 entry["sample"] = payload[:48]
 
+        if should_stop is not None and should_stop():
+            break
         done = (round_no + 1) * len(SCAN_SETTINGS)
-        print(f"  round {round_no + 1}/{rounds} done ({done} probes)")
+        emit(f"  round {round_no + 1}/{rounds} done ({done} probes)")
 
-    print(f"\n{'setting':>16}  {'bytes':>6}  {'text':>5}  sample")
-    print("  " + "-" * 74)
+    emit(f"{'setting':>16}  {'bytes':>6}  {'text':>5}  sample")
+    emit("  " + "-" * 74)
     ranked = []
     for key, entry in results.items():
         # Rank on text quality first, then volume; ties break towards the
@@ -969,27 +985,27 @@ def scan(port, seconds_each=1.5, rounds=3, xonxoff=False, rtscts=False,
     for _any_bytes, ratio, count, _likelihood, (baud, bits, par, stop), entry in ranked:
         label = f"{baud} {bits}{par}{stop}"
         if entry["error"]:
-            print(f"{label:>16}  {'-':>6}  {'-':>5}  error: {entry['error'][:40]}")
+            emit(f"{label:>16}  {'-':>6}  {'-':>5}  error: {entry['error'][:40]}")
             continue
         sample = "".join(chr(b) if 32 <= b < 127 else "." for b in entry["sample"])
-        print(f"{label:>16}  {count:>6}  {ratio * 100:>4.0f}%  {sample}")
+        emit(f"{label:>16}  {count:>6}  {ratio * 100:>4.0f}%  {sample}")
 
     best = next((r for r in ranked if r[2] > 0), None)
-    print()
+    emit("")
     if best is None:
-        print("No bytes at any setting. This is not a baud rate problem --")
-        print("run `monitor` and work through the checklist it prints.")
-        return 1
+        emit("No bytes at any setting. This is not a baud rate problem --")
+        emit("run the monitor and work through the checklist it prints.")
+        return None
     _a, ratio, count, _l, (baud, bits, par, stop), _e = best
-    print(f"Best: {baud} {bits}{par}{stop} ({count} bytes, "
+    emit(f"Best: {baud} {bits}{par}{stop} ({count} bytes, "
           f"{ratio * 100:.0f}% text).")
     if ratio < 0.85:
-        print("That is still not clean text -- treat it as a hint, not an answer,")
-        print("and try the next few rows as well.")
+        emit("That is still not clean text -- treat it as a hint, not an answer,")
+        emit("and try the next few rows as well.")
     else:
-        print(f"Download with:  sdl_levels.py download --port {port} "
-              f"--baud {baud} --bytesize {bits} --parity {par} --stopbits {stop}")
-    return 0
+        emit(f"Download with:  sdl_levels.py download --port {port} "
+             f"--baud {baud} --bytesize {bits} --parity {par} --stopbits {stop}")
+    return (baud, bits, par, stop)
 
 
 # ===========================================================================
@@ -1033,6 +1049,11 @@ def run_gui(preload=None) -> int:
             self.start_vars = []
             self.ports = []
             self.events = queue.Queue()
+            self.diag = None
+            # "auto" leaves the handshake lines as pyserial sets them; some
+            # instruments will not talk until one is forced.
+            self.dtr_mode = tk.StringVar(value="auto")
+            self.rts_mode = tk.StringVar(value="auto")
 
             self._connection()
             self._job()
@@ -1074,6 +1095,14 @@ def run_gui(preload=None) -> int:
             self.download_button.grid(row=0, column=13, padx=(12, 0))
             ttk.Button(box, text="Open file…", command=self.open_file).grid(
                 row=0, column=14, padx=(6, 0))
+
+            ttk.Button(box, text="Connection test…",
+                       command=self.open_diagnostics).grid(
+                row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+            ttk.Label(box, foreground="#5b6672",
+                      text="Nothing arriving? Start here — it shows whether any "
+                           "data reaches the port, and finds the right baud rate.").grid(
+                row=1, column=3, columnspan=12, sticky="w", pady=(8, 0), padx=(8, 0))
 
         def _job(self):
             box = ttk.LabelFrame(self, text="2. Job details", padding=8)
@@ -1162,6 +1191,216 @@ def run_gui(preload=None) -> int:
                     return device
             return choice.split()[0] if choice else None
 
+        # -- connection test ------------------------------------------------
+        def open_diagnostics(self):
+            """A window for working out why nothing is arriving.
+
+            Runs the same `monitor` and `scan` routines the command line uses,
+            with their output piped into a log pane, so a user who will never
+            open a terminal can still do the diagnosis and send the log on.
+            """
+            device = self._selected_port()
+            if not device:
+                messagebox.showwarning("No port", "Choose the serial port first.")
+                return
+            if getattr(self, "diag", None) is not None and self.diag.winfo_exists():
+                self.diag.lift()
+                return
+
+            win = tk.Toplevel(self)
+            self.diag = win
+            win.title("Connection test")
+            win.geometry("860x620")
+            win.transient(self.winfo_toplevel())  # keep it above the main window
+            win.columnconfigure(0, weight=1)
+            win.rowconfigure(2, weight=1)
+
+            self.diag_queue = queue.Queue()
+            self.diag_stop = threading.Event()
+            self.diag_busy = False
+
+            # What the OS knows about this adaptor. The chipset decides whether
+            # macOS needs a driver for it, which is the first thing to rule out.
+            info = ttk.LabelFrame(win, text="Adaptor", padding=8)
+            info.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 0))
+            info.columnconfigure(1, weight=1)
+            details = {}
+            try:
+                details = next((d for d in port_details() if d["device"] == device), {})
+            except SerialUnavailable:
+                pass
+            rows = [("Port", device),
+                    ("Chipset", details.get("chipset") or "unrecognised"),
+                    ("USB VID:PID", details.get("vid_pid") or "-"),
+                    ("Description", details.get("description") or "-")]
+            for i, (label, value) in enumerate(rows):
+                ttk.Label(info, text=label, width=13).grid(row=i, column=0, sticky="w")
+                ttk.Label(info, text=value).grid(row=i, column=1, sticky="w")
+            if "/tty." in device:
+                ttk.Label(info, foreground="#96231f", wraplength=760,
+                          text="This is the tty node: opening it blocks until the "
+                               "instrument asserts carrier detect, which it never "
+                               "does. The cu node will be used instead.").grid(
+                    row=len(rows), column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+            bar = ttk.LabelFrame(win, text="Tests", padding=8)
+            bar.grid(row=1, column=0, sticky="ew", padx=10, pady=(8, 0))
+            self.diag_watch = ttk.Button(bar, text="1. Watch the port",
+                                         command=self._diag_monitor)
+            self.diag_watch.grid(row=0, column=0)
+            self.diag_scan = ttk.Button(bar, text="2. Find the settings",
+                                        command=self._diag_scan)
+            self.diag_scan.grid(row=0, column=1, padx=6)
+            self.diag_stop_button = ttk.Button(bar, text="Stop", state="disabled",
+                                               command=lambda: self.diag_stop.set())
+            self.diag_stop_button.grid(row=0, column=2, padx=(0, 16))
+
+            ttk.Label(bar, text="DTR").grid(row=0, column=3, sticky="e", padx=(6, 4))
+            ttk.Combobox(bar, textvariable=self.dtr_mode, width=6, state="readonly",
+                         values=["auto", "on", "off"]).grid(row=0, column=4)
+            ttk.Label(bar, text="RTS").grid(row=0, column=5, sticky="e", padx=(10, 4))
+            ttk.Combobox(bar, textvariable=self.rts_mode, width=6, state="readonly",
+                         values=["auto", "on", "off"]).grid(row=0, column=6)
+            ttk.Button(bar, text="Copy log", command=self._diag_copy).grid(
+                row=0, column=7, padx=(16, 0))
+            ttk.Label(bar, wraplength=820, foreground="#5b6672",
+                      text="Watch the port, then start the transfer on the "
+                           "instrument. Nothing at all means a port, cable or flow "
+                           "control problem; unreadable characters mean the baud "
+                           "rate or framing is wrong, which test 2 will find.").grid(
+                row=1, column=0, columnspan=8, sticky="w", pady=(8, 0))
+
+            wrap = ttk.Frame(win)
+            wrap.grid(row=2, column=0, sticky="nsew", padx=10, pady=(8, 10))
+            wrap.columnconfigure(0, weight=1)
+            wrap.rowconfigure(0, weight=1)
+            self.diag_log = tk.Text(wrap, wrap="none", font=("Menlo", 10),
+                                    background="#11151a", foreground="#dfe6ee",
+                                    insertbackground="#dfe6ee", padx=8, pady=6)
+            self.diag_log.grid(row=0, column=0, sticky="nsew")
+            vbar = ttk.Scrollbar(wrap, orient="vertical", command=self.diag_log.yview)
+            vbar.grid(row=0, column=1, sticky="ns")
+            hbar = ttk.Scrollbar(wrap, orient="horizontal", command=self.diag_log.xview)
+            hbar.grid(row=1, column=0, sticky="ew")
+            self.diag_log.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set,
+                                    state="disabled")
+
+            self._diag_write(f"Ready. Port {device}.")
+            self._diag_write("Press “Watch the port”, then start the "
+                             "transfer on the instrument.\n")
+            win.protocol("WM_DELETE_WINDOW", self._diag_close)
+            self._diag_drain()
+
+        def _diag_close(self):
+            self.diag_stop.set()
+            if self.diag is not None:
+                self.diag.destroy()
+                self.diag = None
+
+        def _diag_write(self, line):
+            self.diag_log.configure(state="normal")
+            self.diag_log.insert("end", line + "\n")
+            self.diag_log.see("end")
+            self.diag_log.configure(state="disabled")
+
+        def _diag_copy(self):
+            self.clipboard_clear()
+            self.clipboard_append(self.diag_log.get("1.0", "end"))
+            self._status("Connection test log copied to the clipboard.")
+
+        def _line_state(self, var):
+            return None if var.get() == "auto" else var.get() == "on"
+
+        def _diag_run(self, work):
+            """Run a diagnostic on a worker thread, logging as it goes."""
+            if self.diag_busy:
+                return
+            self.diag_busy = True
+            self.diag_stop.clear()
+            for button in (self.diag_watch, self.diag_scan):
+                button.configure(state="disabled")
+            self.diag_stop_button.configure(state="normal")
+
+            def runner():
+                try:
+                    result = work()
+                except Exception as exc:
+                    self.diag_queue.put(("line", f"error: {exc}"))
+                    result = None
+                self.diag_queue.put(("finished", result))
+
+            threading.Thread(target=runner, daemon=True).start()
+
+        def _link_kwargs(self, with_format=True):
+            """Snapshot the link settings on the UI thread.
+
+            Tk variables may only be read from the main thread, so everything a
+            worker needs is turned into plain values here, before the thread
+            starts.
+            """
+            flow = self.flow.get()
+            kwargs = dict(xonxoff=flow == "xon/xoff", rtscts=flow == "rts/cts",
+                          dtr=self._line_state(self.dtr_mode),
+                          rts=self._line_state(self.rts_mode))
+            if with_format:
+                kwargs.update(baudrate=int(self.baud.get()),
+                              bytesize=int(self.databits.get()),
+                              parity=self.parity.get(),
+                              stopbits=int(self.stopbits.get()))
+            return kwargs
+
+        def _diag_monitor(self):
+            device = self._selected_port()
+            kwargs = self._link_kwargs()
+            emit = lambda line: self.diag_queue.put(("line", line))  # noqa: E731
+            self._diag_write("\n" + "=" * 70)
+            self._diag_run(lambda: monitor(device, seconds=120.0, emit=emit,
+                                           should_stop=self.diag_stop.is_set,
+                                           **kwargs))
+
+        def _diag_scan(self):
+            device = self._selected_port()
+            kwargs = self._link_kwargs(with_format=False)
+            emit = lambda line: self.diag_queue.put(("line", line))  # noqa: E731
+            self._diag_write("\n" + "=" * 70)
+            self._diag_run(lambda: ("settings",
+                                    scan(device, emit=emit,
+                                         should_stop=self.diag_stop.is_set, **kwargs)))
+
+        def _diag_drain(self):
+            if self.diag is None or not self.diag.winfo_exists():
+                return
+            try:
+                while True:
+                    kind, payload = self.diag_queue.get_nowait()
+                    if kind == "line":
+                        self._diag_write(payload)
+                    else:
+                        self.diag_busy = False
+                        for button in (self.diag_watch, self.diag_scan):
+                            button.configure(state="normal")
+                        self.diag_stop_button.configure(state="disabled")
+                        self._diag_finished(payload)
+            except queue.Empty:
+                pass
+            self.diag.after(120, self._diag_drain)
+
+        def _diag_finished(self, result):
+            """Offer to adopt the settings a scan found."""
+            if not (isinstance(result, tuple) and len(result) == 2
+                    and result[0] == "settings" and result[1]):
+                return
+            baud, bits, par, stop = result[1]
+            if messagebox.askyesno(
+                    "Settings found",
+                    f"{baud} {bits}{par}{stop} produced readable text.\n\n"
+                    "Use these settings for the download?", parent=self.diag):
+                self.baud.set(str(baud))
+                self.databits.set(str(bits))
+                self.parity.set(par)
+                self.stopbits.set(str(stop))
+                self._status(f"Serial settings set to {baud} {bits}{par}{stop}.")
+
         # -- download --
         def start_download(self):
             device = self._selected_port()
@@ -1170,11 +1409,8 @@ def run_gui(preload=None) -> int:
                 return
             self.download_button.configure(state="disabled")
             self._status("Waiting -- start the transfer on the instrument…")
-            flow = self.flow.get()
-            kwargs = dict(baudrate=int(self.baud.get()), bytesize=int(self.databits.get()),
-                          parity=self.parity.get(), stopbits=int(self.stopbits.get()),
-                          xonxoff=flow == "xon/xoff", rtscts=flow == "rts/cts",
-                          raw_dir=Path.cwd() / "raw")
+            kwargs = self._link_kwargs()
+            kwargs["raw_dir"] = Path.cwd() / "raw"
 
             def work():
                 try:
@@ -1592,8 +1828,10 @@ def main(argv=None) -> int:
                            seconds=args.seconds, show_hex=not args.text)
 
         if args.command == "scan":
-            return scan(args.port, seconds_each=args.seconds_each, rounds=args.rounds,
-                        xonxoff=args.xonxoff, rtscts=args.rtscts, dtr=(None if args.dtr is None else args.dtr == "on"), rts=(None if args.rts is None else args.rts == "on"))
+            return 0 if scan(args.port, seconds_each=args.seconds_each, rounds=args.rounds,
+                        xonxoff=args.xonxoff, rtscts=args.rtscts,
+                        dtr=(None if args.dtr is None else args.dtr == "on"),
+                        rts=(None if args.rts is None else args.rts == "on")) else 1
 
         if args.command == "download":
             print(f"Listening on {args.port} at {args.baud} "
