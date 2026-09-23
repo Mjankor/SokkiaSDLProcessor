@@ -36,6 +36,18 @@ needs is snapshotted first — see `_link_kwargs` — because reading
 `self.baud.get()` inside a lambda that runs on the worker raises "main thread
 is not in main loop" only at runtime, and only when a real port is attached.
 
+## The workbook stays formula-driven
+
+Levels in the Excel output are formulas, not values. That is the property the
+FileMaker export had and it is worth keeping: one benchmark drives the job and
+the arithmetic is visible. A run that carries on from the previous one
+references its closing cell; only a start the operator actually supplied is
+written as a literal. `selftest` retypes the datum and requires every run to
+follow, which is the only check that catches a literal creeping back in.
+
+`openpyxl` is imported lazily like `pyserial` and `tkinter` — the rest of the
+script, `selftest` included, must keep working without it.
+
 ## Conventions
 
 - Serial capture always writes the raw bytes to disk *before* parsing them.

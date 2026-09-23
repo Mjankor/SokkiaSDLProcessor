@@ -16,8 +16,8 @@ python sdl_levels.py selftest                   # prove the reduction is faithfu
 Run with no arguments it opens the window, so it works as a double-click or as
 the file association for a download. `gui` does the same thing explicitly.
 
-Runs on Windows, macOS and Linux. Only the `download` command needs
-`pip install pyserial`; everything else runs on a stock Python 3.9+. The GUI
+Runs on Windows, macOS and Linux. `download` needs `pip install pyserial` and
+the Excel output needs `pip install openpyxl`; everything else runs on a stock Python 3.9+. The GUI
 uses Tkinter, which is bundled with the official Python on Windows and macOS
 (on Linux it is usually a separate package, e.g. `sudo apt install python3-tk`).
 
@@ -28,6 +28,7 @@ python sdl_levels.py ports                              # what's plugged in
 python sdl_levels.py download --port COM3 -o job.csv    # capture
 python sdl_levels.py report job.csv --start-rl 74.614 \
        --surveyor "M. Ankor" --csv levels.csv           # reduce and report
+python sdl_levels.py xlsx job.csv --start-rl 74.614     # Excel workbook
 python sdl_levels.py fmexport job.csv --initial 74.614  # legacy format
 ```
 
@@ -64,6 +65,31 @@ unmodified record of what the instrument sent.
 Open questions only a real download can settle: whether the instrument needs
 DTR asserted or XON/XOFF handshaking, and whether it always sends this CSV
 layout or can send SDR33 depending on a setting.
+
+## The Excel workbook
+
+**Save Excel…** in the app, or `sdl_levels.py xlsx job.csv`. Three sheets:
+
+**Level Book** — the familiar columns, with each reduced level as a **live
+formula** rather than a number. Type a benchmark into the yellow cell and the
+whole job recalculates. The arithmetic stays on the page where it can be
+checked, instead of being a number to take on trust.
+
+**Summary** — per run: sums, the arithmetic check, route length, misclose
+against the `12√K` allowance, and a WITHIN / EXCEEDS verdict that colours
+itself. Also all formulas, so it tracks whatever is typed into the Level Book.
+
+**Raw Download** — the instrument's records exactly as they arrived, with the
+role the reduction gave each one beside it. The finished levels can be traced
+back to what came off the instrument without opening a second file.
+
+One subtlety worth knowing if you edit the generator: a run that simply
+carries on from where the last one closed writes its starting cell as a
+*reference* to that closing level (`=E18`), not as a number. Writing the
+number instead looks correct until someone retypes the benchmark — then run 1
+moves, the later runs stay anchored to the old datum, and the book quietly
+disagrees with itself. `selftest` checks this by retyping the datum and
+requiring every run to follow.
 
 ## When nothing arrives
 

@@ -183,6 +183,7 @@ class Run:
     rows: list = field(default_factory=list)
     start_rl: float = None
     closing_rl: float = None  # known RL of the closing point, if any
+    start_explicit: bool = False  # True when the operator supplied the start
 
     @property
     def first(self):
@@ -242,6 +243,8 @@ class LevelBook:
     rows: list
     runs: list
     observations: int = 0  # raw records downloaded, before pairing
+    records: list = field(default_factory=list)  # the download, for the audit sheet
+    roles: list = field(default_factory=list)    # how each record was classified
 
     @property
     def misclose_ok(self) -> bool:
@@ -362,6 +365,7 @@ def reduce_levels(runs, start_rls) -> None:
             run = by_number[row.run]
             run_no = runs.index(run)
             start = start_rls[run_no] if run_no < len(start_rls) else None
+            run.start_explicit = start is not None
             if start is None:
                 # Resolved here, not up front: the previous run's closing level
                 # is only known once that run has been reduced.
@@ -382,7 +386,8 @@ def reduce_levels(runs, start_rls) -> None:
 
 def build(sdl: SDLFile, start_rls=None, match_point_id: bool = False) -> LevelBook:
     """Raw records in, reduced level book out."""
-    rows = merge(sdl.records, classify(sdl.records), match_point_id)
+    roles = classify(sdl.records)
+    rows = merge(sdl.records, roles, match_point_id)
     runs = split_runs(rows)
     starts = list(start_rls or [])
     starts += [None] * (len(runs) - len(starts))
@@ -392,7 +397,8 @@ def build(sdl: SDLFile, start_rls=None, match_point_id: bool = False) -> LevelBo
             # A run returning to where it started is the common case; the
             # report states the assumption so it can be overridden.
             run.closing_rl = run.start_rl
-    return LevelBook(sdl.header, rows, runs, len(sdl.records))
+    return LevelBook(sdl.header, rows, runs, len(sdl.records),
+                     records=sdl.records, roles=roles)
 
 
 # ===========================================================================
@@ -599,6 +605,214 @@ def to_csv(book: LevelBook) -> str:
                              _f(row.reduced_level), _f(row.rise_fall),
                              _f(row.sight_distance, 2) if row.sight_distance else "", row.note])
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Excel workbook
+# ---------------------------------------------------------------------------
+#
+# Three sheets: the level book, a summary, and the raw download.
+#
+# The levels are written as live formulas rather than numbers, the way the
+# FileMaker export did it.  That is worth keeping: typing a benchmark into the
+# one yellow cell recalculates the whole job, and the arithmetic stays on the
+# page where it can be checked instead of being a number to take on trust.
+#
+# The subtle part is a run that simply carries on from where the last one
+# closed.  Its starting cell must REFERENCE the previous run's closing level,
+# not repeat it as a number -- otherwise retyping the benchmark moves the first
+# run and leaves the rest anchored to the old datum, and the book quietly
+# disagrees with itself.  A run whose start the operator actually supplied gets
+# a literal, because that is a real benchmark rather than a continuation.
+#
+# openpyxl is imported lazily, like pyserial and tkinter, so everything else
+# keeps working where it is not installed.
+
+XLSX_HEADER_FILL = "2F3B47"
+XLSX_INPUT_FILL = "FFF3CD"   # cells the operator is meant to type into
+XLSX_RUN_FILL = "FFF6E5"
+XLSX_NUM = "0.0000"
+
+
+class ExcelUnavailable(RuntimeError):
+    """openpyxl is not installed."""
+
+
+def _require_openpyxl():
+    try:
+        import openpyxl  # noqa: PLC0415
+    except ImportError as exc:
+        raise ExcelUnavailable(
+            "Excel output needs openpyxl. Run: pip install openpyxl") from exc
+    return openpyxl
+
+
+def to_xlsx(book: LevelBook, path, surveyor="", job_note="", coefficient_mm=12.0,
+            source="") -> None:
+    """Write the level book, a summary and the raw download to one workbook."""
+    _require_openpyxl()
+    from openpyxl import Workbook  # noqa: PLC0415
+    from openpyxl.formatting.rule import CellIsRule  # noqa: PLC0415
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side  # noqa: PLC0415
+    from openpyxl.utils import get_column_letter  # noqa: PLC0415
+
+    head_font = Font(bold=True, color="FFFFFF", size=10)
+    head_fill = PatternFill("solid", fgColor=XLSX_HEADER_FILL)
+    input_fill = PatternFill("solid", fgColor=XLSX_INPUT_FILL)
+    run_fill = PatternFill("solid", fgColor=XLSX_RUN_FILL)
+    thin = Side(style="thin", color="B9C2CC")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def header_row(sheet, row, labels, widths=None):
+        for col, label in enumerate(labels, start=1):
+            cell = sheet.cell(row=row, column=col, value=label)
+            cell.font, cell.fill = head_font, head_fill
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+        if widths:
+            for col, width in enumerate(widths, start=1):
+                sheet.column_dimensions[get_column_letter(col)].width = width
+
+    wb = Workbook()
+
+    # -- Level Book ------------------------------------------------------
+    ws = wb.active
+    ws.title = "Level Book"
+    header_row(ws, 1, ["Point", "Backsight", "Intermediate", "Foresight",
+                       "Reduced Level", "Distance", "Notes"],
+               [10, 12, 13, 12, 14, 10, 26])
+
+    def sheet_row(index):
+        return index + 2  # row 1 is the header
+
+    runs_by_number = {run.number: run for run in book.runs}
+    for i, row in enumerate(book.rows):
+        r = sheet_row(i)
+        ws.cell(row=r, column=1, value=row.point_id)
+        ws.cell(row=r, column=2, value=row.bs)
+        ws.cell(row=r, column=3, value=row.is_)
+        ws.cell(row=r, column=4, value=row.fs)
+
+        level = ws.cell(row=r, column=5)
+        if row.starts_run:
+            run = runs_by_number[row.run]
+            carried = i > 0 and not run.start_explicit
+            level.value = f"=E{r - 1}" if carried else row.reduced_level
+            level.fill = input_fill
+            level.border = box
+        else:
+            k = last_backsight_row(book.rows, i)
+            if k is None:
+                level.value = None
+            else:
+                kr = sheet_row(k)
+                column = "D" if row.foresight else "C"
+                level.value = f"=E{kr}+B{kr}-{column}{r}"
+
+        ws.cell(row=r, column=6, value=row.sight_distance or None)
+        ws.cell(row=r, column=7, value=row.note or None)
+        for col in (2, 3, 4, 5, 6):
+            ws.cell(row=r, column=col).number_format = XLSX_NUM
+        if row.starts_run and row.run > 1:
+            for col in range(1, 8):
+                ws.cell(row=r, column=col).fill = run_fill
+    ws.freeze_panes = "A2"
+
+    # -- Summary ---------------------------------------------------------
+    sm = wb.create_sheet("Summary")
+    meta = [("Job", book.header.job),
+            ("Instrument", f"{book.header.model} s/n {book.header.serial}"),
+            ("Surveyor", surveyor),
+            ("Note", job_note),
+            ("Source file", source),
+            ("Observations", book.observations),
+            ("Level book rows", len(book.rows)),
+            ("Produced", datetime.now().strftime("%d %b %Y %H:%M"))]
+    sm.cell(row=1, column=1, value="Level Report").font = Font(bold=True, size=14)
+    for i, (label, value) in enumerate(meta, start=2):
+        if value in ("", None):
+            continue
+        sm.cell(row=i, column=1, value=label).font = Font(bold=True, size=10)
+        sm.cell(row=i, column=2, value=value)
+
+    top = len(meta) + 3
+    header_row(sm, top,
+               ["Run", "From", "To", "Rows", "Sum BS", "Sum FS", "ΣBS − ΣFS",
+                "Last − first RL", "Check", "Route (m)", "Start RL", "Closing RL",
+                "Misclose (mm)", f"Allowable ({coefficient_mm:g}√K)", "Result"],
+               [6, 9, 9, 7, 11, 11, 12, 13, 10, 11, 11, 12, 13, 14, 19])
+
+    index = 0
+    for n, run in enumerate(book.runs):
+        first, last = sheet_row(index), sheet_row(index + len(run.rows) - 1)
+        index += len(run.rows)
+        r = top + 1 + n
+        L = "'Level Book'!"
+        sm.cell(row=r, column=1, value=run.number)
+        sm.cell(row=r, column=2, value=run.first.point_id)
+        sm.cell(row=r, column=3, value=run.last.point_id)
+        sm.cell(row=r, column=4, value=len(run.rows))
+        sm.cell(row=r, column=5, value=f"=SUM({L}B{first}:B{last})")
+        sm.cell(row=r, column=6, value=f"=SUM({L}D{first}:D{last})")
+        sm.cell(row=r, column=7, value=f"=E{r}-F{r}")
+        sm.cell(row=r, column=8, value=f"={L}E{last}-{L}E{first}")
+        sm.cell(row=r, column=9,
+                value=f'=IF(ABS(G{r}-H{r})<0.00005,"agrees","OUT BY "&TEXT(G{r}-H{r},"0.0000"))')
+        sm.cell(row=r, column=10, value=f"=SUM({L}F{first}:F{last})")
+        sm.cell(row=r, column=11, value=f"={L}E{first}")
+        # The closing level is an assumption -- that the run came back to where
+        # it started -- so it is an input cell like the benchmark.
+        sm.cell(row=r, column=12, value=f"=K{r}" if run.closing_rl == run.start_rl
+                else run.closing_rl)
+        sm.cell(row=r, column=12).fill = input_fill
+        sm.cell(row=r, column=12).border = box
+        sm.cell(row=r, column=13, value=f"=({L}E{last}-L{r})*1000")
+        sm.cell(row=r, column=14, value=f"={coefficient_mm:g}*SQRT(J{r}/1000)")
+        sm.cell(row=r, column=15,
+                value=f'=IF(ABS(M{r})<=N{r},"WITHIN TOLERANCE","EXCEEDS TOLERANCE")')
+        for col in (5, 6, 7, 8, 11, 12):
+            sm.cell(row=r, column=col).number_format = XLSX_NUM
+        for col in (10, 13, 14):
+            sm.cell(row=r, column=col).number_format = "0.0"
+
+    if book.runs:
+        span = f"O{top + 1}:O{top + len(book.runs)}"
+        sm.conditional_formatting.add(span, CellIsRule(
+            operator="equal", formula=['"WITHIN TOLERANCE"'],
+            fill=PatternFill("solid", fgColor="DFF0E5"), font=Font(color="14663A")))
+        sm.conditional_formatting.add(span, CellIsRule(
+            operator="equal", formula=['"EXCEEDS TOLERANCE"'],
+            fill=PatternFill("solid", fgColor="FBE3E1"), font=Font(color="96231F")))
+
+    # -- Raw download ----------------------------------------------------
+    #
+    # The instrument's own records, unaltered, with the role each was given by
+    # the reduction beside it -- so the finished levels can be traced back to
+    # what actually came off the instrument without opening another file.
+    rw = wb.create_sheet("Raw Download")
+    rw.cell(row=1, column=1,
+            value=f"Unaltered download from {book.header.model} "
+                  f"s/n {book.header.serial}, job {book.header.job}").font = Font(
+        bold=True, size=11)
+    rw.cell(row=2, column=1,
+            value="“Role” is how the reduction classified each record; "
+                  "“Instrument RL” is the level the instrument itself "
+                  "computed from its assumed datum.").font = Font(
+        italic=True, size=9, color="5B6672")
+    header_row(rw, 4, ["Index", "Point", "Type", "Role", "Distance", "Reading",
+                       "Instrument RL"], [9, 10, 8, 8, 11, 12, 14])
+    roles = book.roles or [""] * len(book.records)
+    for i, (record, role) in enumerate(zip(book.records, roles)):
+        r = i + 5
+        rw.cell(row=r, column=1, value=record.index)
+        rw.cell(row=r, column=2, value=record.point_id)
+        rw.cell(row=r, column=3, value="BS" if record.shot_type == BACKSIGHT else "sight")
+        rw.cell(row=r, column=4, value=role)
+        rw.cell(row=r, column=5, value=record.distance).number_format = "0.00"
+        rw.cell(row=r, column=6, value=float(record.reading)).number_format = XLSX_NUM
+        rw.cell(row=r, column=7, value=record.elevation).number_format = XLSX_NUM
+    rw.freeze_panes = "A5"
+
+    wb.save(str(path))
 
 
 # ===========================================================================
@@ -1163,6 +1377,7 @@ def run_gui(preload=None) -> int:
             self.buttons = []
             for i, (text, cmd) in enumerate([("Save report…", self.save_report),
                                              ("Save CSV…", self.save_csv),
+                                             ("Save Excel…", self.save_xlsx),
                                              ("Save FileMaker format…", self.save_legacy)]):
                 button = ttk.Button(bar, text=text, command=cmd, state="disabled")
                 button.grid(row=0, column=1 + i, padx=4)
@@ -1580,6 +1795,21 @@ def run_gui(preload=None) -> int:
                 Path(path).write_text(to_csv(self.book), encoding="utf-8")
                 self._status(f"CSV written to {path}")
 
+        def save_xlsx(self):
+            path = filedialog.asksaveasfilename(
+                defaultextension=".xlsx", initialfile=f"{self._stem()}.xlsx",
+                filetypes=[("Excel workbook", "*.xlsx")])
+            if not path:
+                return
+            try:
+                to_xlsx(self.book, path, surveyor=self.surveyor.get(),
+                        job_note=self.note.get(), coefficient_mm=self._coefficient(),
+                        source=self.source_name)
+            except ExcelUnavailable as exc:
+                messagebox.showerror("Excel output unavailable", str(exc))
+                return
+            self._status(f"Excel workbook written to {path}")
+
         def save_legacy(self):
             path = filedialog.asksaveasfilename(
                 defaultextension=".txt", initialfile=f"{self._stem()}-reduced.txt",
@@ -1678,6 +1908,63 @@ def selftest() -> int:
     check("run 2 carries forward",
           round(checked.runs[1].start_rl, 4) == round(checked.runs[0].last.reduced_level, 4), True)
 
+    # -- Excel ----------------------------------------------------------
+    # The workbook's levels are formulas, so the only thing that can really be
+    # wrong is a row reference. These checks resolve the formula graph the way
+    # a spreadsheet would and compare it with the reduction, then retype the
+    # benchmark and require every run to follow -- a run whose start repeats a
+    # number instead of referencing the previous run's close passes the first
+    # check and fails the second.
+    print("Excel")
+    try:
+        _require_openpyxl()
+    except ExcelUnavailable as exc:
+        print(f"  SKIP  {exc}")
+    else:
+        import re  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+
+        import openpyxl  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "check.xlsx"
+            to_xlsx(build(sdl, [74.614]), out, surveyor="selftest", source=raw.name)
+            wb = openpyxl.load_workbook(out)
+            check("three sheets", wb.sheetnames,
+                  ["Level Book", "Summary", "Raw Download"])
+            lb = wb["Level Book"]
+            check("raw sheet holds the whole download",
+                  wb["Raw Download"].max_row - 4, len(sdl.records))
+
+            reference = re.compile(r"([A-G])(\d+)")
+
+            def evaluate():
+                """Resolve the sheet's formulas as a spreadsheet would."""
+                cache = {}
+
+                def value(col, row):
+                    if (col, row) in cache:
+                        return cache[(col, row)]
+                    cell = lb[f"{col}{row}"].value
+                    if isinstance(cell, str) and cell.startswith("="):
+                        cell = eval(reference.sub(  # noqa: S307 - our own arithmetic
+                            lambda mo: repr(value(mo.group(1), int(mo.group(2)))),
+                            cell[1:]))
+                    cell = 0.0 if cell is None else cell
+                    cache[(col, row)] = cell
+                    return cell
+
+                return value
+
+            worst = 0.0
+            for datum in (74.614, 100.0, 12.345):
+                lb["E2"] = datum
+                value = evaluate()
+                expected = build(sdl, [datum])
+                for i, row in enumerate(expected.rows):
+                    worst = max(worst, abs(value("E", i + 2) - row.reduced_level))
+            check("formulas match the reduction at three datums", worst < 5e-9, True)
+
     print()
     if failures:
         print(f"{len(failures)} FAILED:", file=sys.stderr)
@@ -1701,7 +1988,7 @@ def _starts(values):
 
 
 COMMANDS = ("gui", "ports", "selftest", "download", "report", "fmexport",
-            "monitor", "scan")
+            "xlsx", "monitor", "scan")
 
 
 def main(argv=None) -> int:
@@ -1775,12 +2062,22 @@ def main(argv=None) -> int:
     rp.add_argument("input")
     rp.add_argument("-o", "--out", help="output HTML (default <input>-report.html)")
     rp.add_argument("--csv", help="also write a flat CSV of reduced levels")
+    rp.add_argument("--xlsx", help="also write an Excel workbook (needs openpyxl)")
     rp.add_argument("--start-rl", action="append", metavar="RL",
                     help="starting level for a run; repeat per run, or 'carry'")
     rp.add_argument("--surveyor", default="")
     rp.add_argument("--note", default="")
     rp.add_argument("--allowance", type=float, default=12.0,
                     help="misclose allowance coefficient in mm (default 12 sqrt K)")
+
+    xl = subs.add_parser("xlsx", help="write an Excel workbook of the reduced levels")
+    xl.add_argument("input")
+    xl.add_argument("-o", "--out", help="output .xlsx (default <input>.xlsx)")
+    xl.add_argument("--start-rl", action="append", metavar="RL",
+                    help="starting level for a run; repeat per run, or 'carry'")
+    xl.add_argument("--surveyor", default="")
+    xl.add_argument("--note", default="")
+    xl.add_argument("--allowance", type=float, default=12.0)
 
     fm = subs.add_parser("fmexport", help="write the legacy FileMaker tab-separated file")
     fm.add_argument("input")
@@ -1875,6 +2172,10 @@ def main(argv=None) -> int:
             if args.csv:
                 Path(args.csv).write_text(to_csv(book), encoding="utf-8")
                 print(f"Wrote {args.csv}")
+            if args.xlsx:
+                to_xlsx(book, args.xlsx, surveyor=args.surveyor, job_note=args.note,
+                        coefficient_mm=args.allowance, source=Path(args.input).name)
+                print(f"Wrote {args.xlsx}")
             for run in book.runs:
                 line = (f"  Run {run.number}: {run.first.point_id}->{run.last.point_id}, "
                         f"{len(run.rows)} rows, {run.length_m:.0f} m")
@@ -1886,6 +2187,15 @@ def main(argv=None) -> int:
                 print(line)
             return 0 if book.misclose_ok else 1
 
+        if args.command == "xlsx":
+            book = build(parse_file(args.input), _starts(args.start_rl))
+            out = Path(args.out or f"{Path(args.input).stem}.xlsx")
+            to_xlsx(book, out, surveyor=args.surveyor, job_note=args.note,
+                    coefficient_mm=args.allowance, source=Path(args.input).name)
+            print(f"Wrote {out} ({len(book.rows)} rows, {len(book.runs)} run(s), "
+                  f"{book.observations} raw records)")
+            return 0
+
         if args.command == "fmexport":
             book = build(parse_file(args.input))
             text = fm_export(book, args.initial)
@@ -1895,7 +2205,7 @@ def main(argv=None) -> int:
             print(f"Wrote {out} ({len(text)} bytes, FileMaker-compatible)")
             return 0
 
-    except SerialUnavailable as exc:
+    except (SerialUnavailable, ExcelUnavailable) as exc:
         print(exc, file=sys.stderr)
         return 2
     except SDLParseError as exc:
