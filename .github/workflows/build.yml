@@ -1,0 +1,118 @@
+name: Build apps
+
+# Deliberately NOT on every push. macOS runners bill at 10x minutes once this
+# repository is private, and a binary is only actually wanted at a release.
+# Use "Run workflow" on the Actions tab for an ad-hoc build.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # the release job needs to create a release
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # one platform failing should not hide the other's result
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS
+            asset: SDLProcessor-macOS.zip
+          - os: windows-latest
+            label: Windows
+            asset: SDLProcessor-Windows.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pyserial openpyxl pyinstaller
+
+      # Verify from source before building anything. The sample job and the
+      # FileMaker output it must reproduce live in the repository; they are
+      # used here and deliberately not bundled into the app.
+      - name: Self-test
+        run: python sdl_levels.py selftest
+
+      - name: Build macOS .app
+        if: runner.os == 'macOS'
+        run: pyinstaller --noconfirm --windowed --name SDLProcessor sdl_levels.py
+
+      # One directory rather than one file on Windows: it starts faster and
+      # draws fewer antivirus false positives than a self-extracting binary.
+      - name: Build Windows folder
+        if: runner.os == 'Windows'
+        run: pyinstaller --noconfirm --onedir --name SDLProcessor sdl_levels.py
+
+      - name: Show what was built
+        shell: bash
+        run: ls -R dist
+
+      # Smoke-test the built binary end to end, pointed at the sample download
+      # in the checkout -- which is how a user points it at their own file.
+      - name: Smoke test the build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            APP="dist/SDLProcessor.app/Contents/MacOS/SDLProcessor"
+          else
+            APP="dist/SDLProcessor/SDLProcessor.exe"
+          fi
+          "$APP" --version
+          "$APP" report data/AZM020420.csv --start-rl 74.614 \
+                 -o smoke.html --xlsx smoke.xlsx
+          test -s smoke.html
+          test -s smoke.xlsx
+          echo "built app reduced the sample job and wrote both outputs"
+
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        # ditto rather than zip: it preserves the .app bundle structure and
+        # the executable bits, which a plain zip loses.
+        run: ditto -c -k --keepParent dist/SDLProcessor.app "${{ matrix.asset }}"
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/SDLProcessor/* -DestinationPath "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Unsigned builds.
+
+          **macOS** — the app is not signed, so Gatekeeper will refuse it on a double-click. Right-click the app and choose Open, then confirm; only needed the first time.
+
+          **Windows** — SmartScreen will warn. Choose More info, then Run anyway. Keep the whole extracted folder together; SDLProcessor.exe needs the files beside it.
+
+          Neither build bundles the sample job data." \
+            artifacts/*/*.zip

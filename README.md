@@ -66,6 +66,35 @@ Open questions only a real download can settle: whether the instrument needs
 DTR asserted or XON/XOFF handshaking, and whether it always sends this CSV
 layout or can send SDR33 depending on a setting.
 
+## Building the apps
+
+`.github/workflows/build.yml` builds a macOS `.app` and a Windows folder on
+GitHub's own runners — there is no cross-compilation, so each has to be built
+on its own operating system.
+
+It runs on a `v*` tag, or on demand from the Actions tab ("Run workflow"). It
+is deliberately **not** on every push: macOS runners bill at 10× minutes on a
+private repository, and a binary is only wanted at a release. Tagging
+`v0.3.0` builds both platforms, smoke-tests each against the sample job, and
+attaches the two zips to a release.
+
+Neither build bundles the sample data, so `selftest` only works from a source
+checkout.
+
+**The builds are unsigned.** On macOS, Gatekeeper refuses an unsigned app on a
+double-click — right-click and choose Open, then confirm, once. On Windows,
+SmartScreen warns; More info → Run anyway. Signing them properly needs an
+Apple Developer ID ($99/year) and a Windows certificate, which can be added
+later without changing anything else.
+
+To build locally instead:
+
+```sh
+pip install pyserial openpyxl pyinstaller
+pyinstaller --noconfirm --windowed --name SDLProcessor sdl_levels.py   # macOS
+pyinstaller --noconfirm --onedir  --name SDLProcessor sdl_levels.py    # Windows
+```
+
 ## The Excel workbook
 
 **Save Excel…** in the app, or `sdl_levels.py xlsx job.csv`. Three sheets:

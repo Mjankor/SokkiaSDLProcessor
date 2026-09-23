@@ -1856,7 +1856,11 @@ def selftest() -> int:
     """
     raw, gold = HERE / "data" / "AZM020420.csv", HERE / "data" / "AZM020420-reduced.txt"
     if not raw.exists():
-        print(f"missing test data: {raw}", file=sys.stderr)
+        # The packaged app deliberately does not ship the sample job, so this
+        # is a source-checkout command rather than something a user can run.
+        print(f"The sample job is not here ({raw}).\n"
+              "selftest runs against data/AZM020420.csv from the repository; "
+              "the packaged app does not bundle it.", file=sys.stderr)
         return 2
 
     failures = []
