@@ -57,7 +57,13 @@ instrument's menu; the host does not request anything. So the script opens the
 port, waits (up to `--start-timeout`, default 3 minutes) for the first byte,
 then reads until the line has been quiet for `--idle-timeout` (default 3 s).
 
-**Every capture writes the raw bytes to `raw/` before anything parses them.**
+**Every capture writes the raw bytes to an archive folder before anything
+parses them.** That is `./raw` when the working directory is one you chose,
+and `~/Documents/Sokkia SDL/raw` when it is not — an app launched from the
+Finder or the Start menu inherits a working directory the user never picked
+(`/` on macOS), which is read-only. If the archive cannot be written the
+download is still kept and reduced, with a warning: the instrument sends its
+data once and a completed download is never thrown away over a folder.
 That file is the evidence if a download ever fails to parse, and it can be
 replayed through the rest of the script offline. Worth keeping anyway as the
 unmodified record of what the instrument sent.

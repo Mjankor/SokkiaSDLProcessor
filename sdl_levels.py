@@ -25,6 +25,7 @@ import argparse
 import csv
 import html
 import io
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -834,6 +835,22 @@ def to_xlsx(book: LevelBook, path, surveyor="", job_note="", coefficient_mm=12.0
 # where it is not installed.
 
 
+def default_raw_dir() -> Path:
+    """Where to archive raw captures when no folder was chosen.
+
+    An app launched from the Finder or the Start menu inherits a working
+    directory the user never picked -- "/" on macOS -- so a relative "raw"
+    folder lands at /raw on a read-only volume. Use the working directory only
+    when it is plausibly one the user chose and is actually writable;
+    otherwise fall back to a fixed, findable folder in their home.
+    """
+    cwd = Path.cwd()
+    if cwd != Path(cwd.anchor) and os.access(cwd, os.W_OK):
+        return cwd / "raw"
+    documents = Path.home() / "Documents"
+    return (documents if documents.is_dir() else Path.home()) / "Sokkia SDL" / "raw"
+
+
 class SerialUnavailable(RuntimeError):
     """pyserial is not installed."""
 
@@ -863,6 +880,7 @@ class Capture:
     data: bytes
     raw_path: Path
     seconds: float
+    raw_error: str = ""  # why the raw bytes could not be archived, if they could not
 
     @property
     def text(self) -> str:
@@ -910,13 +928,20 @@ def capture(port, baudrate=9600, bytesize=8, parity="N", stopbits=1,
                 break
 
     payload = b"".join(chunks)
-    raw_path = None
+    raw_path, raw_error = None, ""
     if raw_dir and payload:
         raw_dir = Path(raw_dir)
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        raw_path = raw_dir / f"{job_hint}-{datetime.now():%Y%m%d-%H%M%S}.raw"
-        raw_path.write_bytes(payload)
-    return Capture(payload, raw_path, time.monotonic() - started)
+        try:
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            candidate = raw_dir / f"{job_hint}-{datetime.now():%Y%m%d-%H%M%S}.raw"
+            candidate.write_bytes(payload)
+            raw_path = candidate
+        except OSError as exc:
+            # The instrument sends its data once. Never throw a completed
+            # download away because the archive folder could not be written --
+            # report it and let the caller get the levels out.
+            raw_error = f"{raw_dir}: {exc.strerror or exc}"
+    return Capture(payload, raw_path, time.monotonic() - started, raw_error)
 
 
 # ===========================================================================
@@ -1625,7 +1650,7 @@ def run_gui(preload=None) -> int:
             self.download_button.configure(state="disabled")
             self._status("Waiting -- start the transfer on the instrument…")
             kwargs = self._link_kwargs()
-            kwargs["raw_dir"] = Path.cwd() / "raw"
+            kwargs["raw_dir"] = default_raw_dir()
 
             def work():
                 try:
@@ -1662,7 +1687,14 @@ def run_gui(preload=None) -> int:
                     "the instrument's RS-232 socket, and that the transfer was started on "
                     "the instrument.")
                 return
-            where = f"\nRaw capture saved to {result.raw_path}" if result.raw_path else ""
+            if result.raw_path:
+                where = f"\nRaw capture saved to {result.raw_path}"
+            elif result.raw_error:
+                where = (f"\nWARNING: the raw capture could not be archived "
+                         f"({result.raw_error}). The data below is fine, but save "
+                         f"the report now -- the instrument will not send it again.")
+            else:
+                where = ""
             try:
                 self.sdl = parse(result.text)
             except SDLParseError as exc:
@@ -1912,6 +1944,32 @@ def selftest() -> int:
     check("run 2 carries forward",
           round(checked.runs[1].start_rl, 4) == round(checked.runs[0].last.reduced_level, 4), True)
 
+    # -- Paths ----------------------------------------------------------
+    # A .app launched from the Finder starts with the working directory at
+    # "/", which once sent raw captures to /raw and failed on the read-only
+    # volume -- losing a download the instrument only sends once.
+    print("Paths")
+    import contextlib  # noqa: PLC0415
+    import os as _os  # noqa: PLC0415
+
+    @contextlib.contextmanager
+    def working_dir(path):
+        previous = _os.getcwd()
+        _os.chdir(path)
+        try:
+            yield
+        finally:
+            _os.chdir(previous)
+
+    with working_dir(Path.cwd().anchor):
+        fallback = default_raw_dir()
+    check("archive folder is not on the root volume",
+          fallback.parent.parent != Path(Path.cwd().anchor), True)
+    check("archive folder is under the user's home",
+          str(fallback).startswith(str(Path.home())), True)
+    check("a writable working directory is still used",
+          default_raw_dir(), Path.cwd() / "raw")
+
     # -- Excel ----------------------------------------------------------
     # The workbook's levels are formulas, so the only thing that can really be
     # wrong is a row reference. These checks resolve the formula graph the way
@@ -2059,7 +2117,9 @@ def main(argv=None) -> int:
     dl.add_argument("--rts", choices=["on", "off"], help="force the RTS line")
     dl.add_argument("--idle-timeout", type=float, default=3.0)
     dl.add_argument("--start-timeout", type=float, default=180.0)
-    dl.add_argument("--raw-dir", default="raw", help="where to archive the raw capture")
+    dl.add_argument("--raw-dir", default=None,
+                    help="where to archive the raw capture (default: ./raw, or a "
+                         "folder in your home if the working directory is not writable)")
     dl.add_argument("-o", "--out", help="write the decoded CSV here too")
 
     rp = subs.add_parser("report", help="reduce a CSV and write a level report")
@@ -2140,7 +2200,7 @@ def main(argv=None) -> int:
             print("Start the transfer on the instrument now...")
             result = capture(args.port, baudrate=args.baud, bytesize=args.bytesize,
                              parity=args.parity, stopbits=args.stopbits, xonxoff=args.xonxoff,
-                             rtscts=args.rtscts, raw_dir=args.raw_dir,
+                             rtscts=args.rtscts, raw_dir=args.raw_dir or default_raw_dir(),
                              dtr=(None if args.dtr is None else args.dtr == "on"), rts=(None if args.rts is None else args.rts == "on"),
                              idle_timeout=args.idle_timeout, start_timeout=args.start_timeout,
                              on_progress=lambda n: print(f"\r  {n} bytes", end="", flush=True))
@@ -2154,6 +2214,9 @@ def main(argv=None) -> int:
             print(f"Captured {len(result.data)} bytes in {result.seconds:.1f}s")
             if result.raw_path:
                 print(f"Raw capture: {result.raw_path}")
+            elif result.raw_error:
+                print(f"WARNING: could not archive the raw capture ({result.raw_error})",
+                      file=sys.stderr)
             if args.out:
                 Path(args.out).write_text(result.text, encoding="ascii", errors="replace")
                 print(f"Wrote {args.out}")
